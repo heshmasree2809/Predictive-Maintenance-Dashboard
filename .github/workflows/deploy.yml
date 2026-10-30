@@ -1,0 +1,111 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ develop ]
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+# ── Deployment architecture ──────────────────────────────────────────────────
+# Backend  → Railway (auto-deploys from GitHub on every push to main)
+# Frontend → Vercel  (auto-deploys from GitHub on every push to main)
+#
+# The CI pipeline's job is to run all tests and verify the live deployment
+# is healthy.  No manual build/push/deploy steps are required.
+#
+# ── Required GitHub Actions secrets ─────────────────────────────────────────
+# (none currently required — Railway and Vercel use their own GitHub integrations)
+# ─────────────────────────────────────────────────────────────────────────────
+
+jobs:
+  # ── 1. Test & build ──────────────────────────────────────────────────────────
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Backend (Python) ─────────────────────────────────────────────────────
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install backend dependencies
+        run: |
+          cd backend
+          pip install -r requirements.txt
+
+      - name: Run backend tests (pytest)
+        run: |
+          cd backend
+          python -m pytest tests/ -v --tb=short
+
+      # ── Frontend (Node) ──────────────────────────────────────────────────────
+      # package.json is now at the repo root — no need to cd frontend.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Use npm install (not npm ci) — the package-lock.json is generated on
+      # Windows and omits Linux-specific optional packages, causing npm ci to
+      # fail with "Missing: yaml@2.9.0" and similar errors on Ubuntu runners.
+      - name: Install frontend dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: Run frontend tests (Jest)
+        run: CI=true npm test -- --watchAll=false --forceExit
+
+      # Build the production bundle — uses .env.production for REACT_APP_API_URL.
+      # REACT_APP_API_URL is intentionally empty in .env.production so the
+      # Vercel proxy handles all /api/* traffic (no direct Railway calls from
+      # the browser needed).
+      # DISABLE_ESLINT_PLUGIN prevents ESLint warnings from failing the build
+      # when CI=true (CRA treats any warning as a build error in CI mode).
+      - name: Build frontend (production bundle)
+        env:
+          REACT_APP_API_URL: ""
+          DISABLE_ESLINT_PLUGIN: "true"
+        run: npm run build
+
+  # ── 2. Verify live deployments (main branch only) ────────────────────────────
+  # Railway and Vercel both auto-deploy from GitHub — no manual push/deploy needed.
+  # This job confirms the Railway backend is healthy after the push lands.
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Verify Railway backend health
+        run: |
+          echo "Pinging Railway backend health endpoint..."
+          HTTP=$(curl -sf -o /dev/null -w "%{http_code}" \
+                 --max-time 30 \
+                 https://predictive-maintenance-dashboard-production.up.railway.app/health \
+                 || echo "000")
+          echo "HTTP status: $HTTP"
+          if [ "$HTTP" = "200" ]; then
+            echo "✅  Railway backend is healthy"
+          else
+            echo "⚠️  Railway health check returned HTTP $HTTP"
+            echo "    Check the Railway dashboard for deployment logs:"
+            echo "    https://railway.app/dashboard"
+            exit 1
+          fi
+
+      - name: Deployment summary
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  ✅  All tests passed"
+          echo "  ✅  Production build succeeded"
+          echo "  ✅  Railway backend is healthy"
+          echo ""
+          echo "  Auto-deployment targets (triggered by this push):"
+          echo "  • Backend  → Railway  (auto-deploys via GitHub integration)"
+          echo "  • Frontend → Vercel   (auto-deploys via GitHub integration)"
+          echo ""
+          echo "  Railway: https://predictive-maintenance-dashboard-production.up.railway.app"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

@@ -1,0 +1,50 @@
+from sqlalchemy import create_engine, event
+from sqlalchemy.orm import sessionmaker, declarative_base
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+
+DATABASE_URL = os.getenv('DATABASE_URL')
+
+# Allow local development without Docker/Postgres by falling back to SQLite
+if not DATABASE_URL:
+    _db_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'maintenance.db')
+    DATABASE_URL = f'sqlite:///{_db_path}'
+    print(f'[db] DATABASE_URL not set — using SQLite fallback: {DATABASE_URL}')
+
+_is_sqlite = DATABASE_URL.startswith('sqlite')
+
+_engine_kwargs: dict = {'pool_pre_ping': True}
+if _is_sqlite:
+    # SQLite requires check_same_thread=False when used with FastAPI
+    _engine_kwargs['connect_args'] = {'check_same_thread': False}
+else:
+    # PostgreSQL: maintain a warm connection pool so queries don't pay a
+    # TCP-handshake penalty on every request.
+    _engine_kwargs.update({
+        'pool_size':     10,   # keep up to 10 idle connections ready
+        'max_overflow':  20,   # allow up to 20 extra under burst load
+        'pool_timeout':  30,   # wait at most 30 s for a free connection
+        'pool_recycle':  300,  # recycle connections every 5 min (avoids stale sockets)
+    })
+
+engine = create_engine(DATABASE_URL, **_engine_kwargs)
+
+# Enable WAL mode for SQLite so concurrent reads don't block writes
+if _is_sqlite:
+    @event.listens_for(engine, 'connect')
+    def _set_sqlite_pragma(dbapi_conn, _rec):
+        dbapi_conn.execute('PRAGMA journal_mode=WAL')
+        dbapi_conn.execute('PRAGMA foreign_keys=ON')
+
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+Base = declarative_base()
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
