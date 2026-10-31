@@ -76,7 +76,7 @@ Predictive-Maintenance-Dashboard/
 ├── README.md
 ├── railway.json
 └── vercel.json
-```
+````
 
 The exact structure may change as the project evolves.
 
